@@ -1,6 +1,7 @@
 package d2xx
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -17,6 +18,10 @@ type Flash struct {
 	Configuration [10]byte
 	DeviceID      uint16
 	RevisionID    uint16
+
+	// Program Flash Memory
+	lenPFM int
+	posPFM int
 }
 
 func OpenFlash() (*Flash, error) {
@@ -112,7 +117,36 @@ func (f *Flash) WriterInfo() (ftdi.DevType, uint16, uint16) {
 }
 
 func (f *Flash) Read(p []byte) (n int, err error) {
-	return 0, io.EOF
+	if f.posPFM >= f.lenPFM {
+		return n, io.EOF
+	}
+
+	bytes := len(p)
+	if f.posPFM+bytes > f.lenPFM {
+		bytes = f.lenPFM - f.posPFM
+	}
+	words := (bytes + 1) >> 1
+
+	err = f.loadAddress(uint32(f.posPFM))
+	if err != nil {
+		return n, err
+	}
+
+	for i := 0; i < words; i++ {
+		value16, err := f.readWord()
+		if err != nil {
+			return n, err
+		}
+		f.posPFM += 2
+
+		p[i*2+0] = byte(value16 & 0xff) // swap
+		n += 1
+		if bytes&1 == 0 {
+			p[i*2+1] = byte(value16 >> 8) // swap
+			n += 1
+		}
+	}
+	return n, nil
 }
 
 func (f *Flash) tryMpsse(dev *device) error {
@@ -315,6 +349,15 @@ func (f *Flash) resetPIC() error {
 	err = f.loadAddress(0)
 	if err != nil {
 		return err
+	}
+
+	f.posPFM = 0
+
+	switch f.DeviceID {
+	case 0x74A0:
+		f.lenPFM = 0x2_0000
+	default:
+		return errors.New("unknown target device")
 	}
 
 	return nil
