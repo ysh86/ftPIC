@@ -27,10 +27,6 @@ func main() {
 		return
 	}
 
-	// ft
-	verMajor, verMinor, verPatch := d2xx.Version()
-	fmt.Printf("d2xx library version: %d.%d.%d\n", verMajor, verMinor, verPatch)
-
 	flash, err := d2xx.OpenFlash()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "d2xx: %s\n", err)
@@ -38,8 +34,43 @@ func main() {
 	}
 	defer flash.Close()
 
-	devType, venID, devID := flash.DevInfo()
+	// ft (writer)
+	verMajor, verMinor, verPatch := d2xx.Version()
+	devType, venID, devID := flash.WriterInfo()
+	fmt.Println("Writer info:")
+	fmt.Printf("d2xx library version: %d.%d.%d\n", verMajor, verMinor, verPatch)
 	fmt.Printf("DevType: %v(%d), vendor ID: 0x%04x, device ID: 0x%04x\n", devType, devType, venID, devID)
+	fmt.Println()
+
+	// target
+	fmt.Println("Target info:")
+	major := "A"
+	if (flash.RevisionID>>6)&0b11_1111 == 1 {
+		major = "B"
+	}
+	if (flash.RevisionID>>6)&0b11_1111 == 2 {
+		major = "C"
+	}
+	fmt.Printf("device: %04X, revision: %04X (%s%d)\n",
+		flash.DeviceID,
+		flash.RevisionID,
+		major,
+		flash.RevisionID&0b11_1111,
+	)
+	fmt.Printf("User IDs (32 Words)\n")
+	for i := 0; i < 32; i += 8 {
+		for ii := 0; ii < 8; ii++ {
+			value16 := flash.UserIDs[i+ii]
+			fmt.Printf(" %02x %02x", value16&0xff, value16>>8) // swap
+		}
+		fmt.Println()
+	}
+	fmt.Printf("Configuration Bytes (10 Bytes)\n")
+	for i := 0; i < 10; i++ {
+		fmt.Printf(" %02x", flash.Configuration[i])
+	}
+	fmt.Println()
+	fmt.Println()
 
 	// dump
 	if outFile != "" {

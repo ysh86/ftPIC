@@ -11,6 +11,12 @@ import (
 type Flash struct {
 	devA     *device
 	commands [8192 * 2]byte
+
+	// target
+	UserIDs       [32]uint16
+	Configuration [10]byte
+	DeviceID      uint16
+	RevisionID    uint16
 }
 
 func OpenFlash() (*Flash, error) {
@@ -64,14 +70,14 @@ func OpenFlash() (*Flash, error) {
 	}
 
 	// setup GPIO
-	err = f.n64SetupPins()
+	err = f.setupPICPins()
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
 
 	// now ready to go
-	err = f.n64ResetCart()
+	err = f.resetPIC()
 	if err != nil {
 		f.Close()
 		return nil, err
@@ -82,31 +88,31 @@ func OpenFlash() (*Flash, error) {
 
 func (f *Flash) Close() {
 	if f.devA != nil {
+		b := 0
+		e := 0
+
+		// /MCLR high
+		f.commands[e] = 0x80
+		e++
+		f.commands[e] = 0b1000_0001 // /MCLR:1,   state:0,   ICSPDAT:0,   ICSPCLK:0
+		e++
+		f.commands[e] = 0b1111_1011 // /MCLR:Out, state:Out, ICSPDAT:Out, ICSPCLK:Out
+		e++
+		e = f.pushDelay(2, e)
+		f.devA.write(f.commands[b:e])
+
 		f.devA.setBitMode(0, bitModeReset)
 		f.devA.closeDev()
 		f.devA = nil
 	}
 }
 
-func (f *Flash) DevInfo() (ftdi.DevType, uint16, uint16) {
+func (f *Flash) WriterInfo() (ftdi.DevType, uint16, uint16) {
 	return f.devA.t, f.devA.venID, f.devA.devID
 }
 
 func (f *Flash) Read(p []byte) (n int, err error) {
 	return 0, io.EOF
-}
-
-func (f *Flash) Read512(addr uint32) ([]byte, error) {
-	err := f.n64SetAddress(addr)
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := f.n64ReadROM512()
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
 }
 
 func (f *Flash) tryMpsse(dev *device) error {
@@ -165,58 +171,40 @@ func (f *Flash) tryMpsse(dev *device) error {
 	return nil
 }
 
-// n64 pins:
+// PIC pins:
 //
 // Channel A:
 // ADBUS0: TCK/SK: OUT (SPI SCLK)
 // ADBUS1: TDI/DO: OUT (SPI MOSI)
 // ADBUS2: TDO/DI: IN  (SPI MISO) // TODO: Not used. It should be output/Lo or loopback?
-// ADBUS3: TMS/CS: OUT SPI CS -> Ch.B GPIOL1
-// ADBUS4: GPIOL0: OUT /WE
-// ADBUS5: GPIOL1: OUT /RE
-// ADBUS6: GPIOL2: OUT ALE_L
-// ADBUS7: GPIOL3: OUT ALE_H
+// ADBUS3: TMS/CS: OUT (SPI CS)
+// ADBUS4: GPIOL0: OUT ICSPCLK
+// ADBUS5: GPIOL1: I/O ICSPDAT
+// ADBUS6: GPIOL2: OUT (not used)
+// ADBUS7: GPIOL3: OUT /MCLR
 //
-// ACBUS0: GPIOH0: I/O AD0 (default: In)
-// ACBUS1: GPIOH1: I/O AD1 (default: In)
-// ACBUS2: GPIOH2: I/O AD2 (default: In)
-// ACBUS3: GPIOH3: I/O AD3 (default: In)
-// ACBUS4: GPIOH4: I/O AD4 (default: In)
-// ACBUS5: GPIOH5: I/O AD5 (default: In)
-// ACBUS6: GPIOH6: I/O AD6 (default: In)
-// ACBUS7: GPIOH7: I/O AD7 (default: In)
+// ACBUS0: GPIOH0: OUT (not used)
+// ACBUS1: GPIOH1: OUT (not used)
+// ACBUS2: GPIOH2: OUT (not used)
+// ACBUS3: GPIOH3: OUT (not used)
+// ACBUS4: GPIOH4: OUT (not used)
+// ACBUS5: GPIOH5: OUT (not used)
+// ACBUS6: GPIOH6: OUT (not used)
+// ACBUS7: GPIOH7: OUT (not used)
 //
-// Channel B:
-// BDBUS0: TCK/SK: OUT (SPI SCLK)
-// BDBUS1: TDI/DO: OUT (SPI MOSI)
-// BDBUS2: TDO/DI: IN  (SPI MISO) // TODO: Not used. It should be output/Lo or loopback?
-// BDBUS3: TMS/CS: OUT (SPI CS)
-// BDBUS4: GPIOL0: OUT /RST
-// BDBUS5: GPIOL1: IN  WAIT for Ch.A
-// BDBUS6: GPIOL2: OUT CLK
-// BDBUS7: GPIOL3: IN  S_DAT // TODO: Not used. It should be output/Lo? or Pull-up.
-//
-// BCBUS0: GPIOH0: I/O AD8  (default: In)
-// BCBUS1: GPIOH1: I/O AD9  (default: In)
-// BCBUS2: GPIOH2: I/O AD10 (default: In)
-// BCBUS3: GPIOH3: I/O AD11 (default: In)
-// BCBUS4: GPIOH4: I/O AD12 (default: In)
-// BCBUS5: GPIOH5: I/O AD13 (default: In)
-// BCBUS6: GPIOH6: I/O AD14 (default: In)
-// BCBUS7: GPIOH7: I/O AD15 (default: In)
-func (f *Flash) n64SetupPins() error {
+// Channel B: ASYNC Serial (RS232)
+func (f *Flash) setupPICPins() error {
 	b := 0
 	e := 0
 
-	// clock: master 60_000_000 / ((1+0x0002)*2) [Hz] = 10[MHz]
-	// TODO: 7.5[MHz] for flash:3
+	// clock: master 60_000_000 / ((1+0x000e)*2) [Hz] = 2[MHz]
 	clockDivisorHi := uint8(0x00)
-	clockDivisorLo := uint8(0x02)
+	clockDivisorLo := uint8(0x0e)
 	f.commands[e] = 0x8a // Use 60MHz master clock
 	e++
 	f.commands[e] = 0x97 // Turn off adaptive clocking
 	e++
-	f.commands[e] = 0x8c // Enable three-phase clocking for I2C EEPROM
+	f.commands[e] = 0x8d // Disable three-phase clocking for I2C EEPROM
 	e++
 	f.commands[e] = 0x86 // set clock divisor
 	e++
@@ -230,19 +218,20 @@ func (f *Flash) n64SetupPins() error {
 	}
 	b = e
 
-	// pins A
+	// init pins
 	f.commands[e] = 0x80
 	e++
-	f.commands[e] = 0b1011_0001 // ALE_H:1, ALE_L:0, /RE:1, /WE:1, CS:0, (MISO:0, MOSI:0, SCLK:1)
+	f.commands[e] = 0b1000_0001 // /MCLR:1,   state:0,   ICSPDAT:0,   ICSPCLK:0,   (CS:0,   MISO:0,  MOSI:0,   SCLK:1)
 	e++
-	f.commands[e] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out, (MISO:In, MOSI:Out, SCLK:Out)
+	f.commands[e] = 0b1111_1011 // /MCLR:Out, state:Out, ICSPDAT:Out, ICSPCLK:Out, (CS:Out, MISO:In, MOSI:Out, SCLK:Out)
 	e++
 	f.commands[e] = 0x82
 	e++
-	f.commands[e] = 0x00 // AD7-0:0
+	f.commands[e] = 0x00 // state:0
 	e++
-	f.commands[e] = 0x00 // AD7-0:In
+	f.commands[e] = 0b1111_1111 // direction:Out
 	e++
+	e = f.pushDelay(1, e)
 	_, err = f.devA.write(f.commands[b:e])
 	if err != nil {
 		return err
@@ -252,302 +241,215 @@ func (f *Flash) n64SetupPins() error {
 	return nil
 }
 
-func (f *Flash) n64ResetCart() error {
+func (f *Flash) resetPIC() error {
 	b := 0
 	e := 0
 
-	// pins B
+	// /MCLR low
 	f.commands[e] = 0x80
 	e++
-	f.commands[e] = 0b0100_0001 // S_DAT, CLK, WAIT, /RST:0, CS
+	f.commands[e] = 0b0000_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:0
 	e++
-	f.commands[e] = 0b0101_1011 // S_DAT:In, CLK:Out, WAIT:In, /RST:Out, CS:Out
+	f.commands[e] = 0b1111_1011 // /MCLR:Out, state:Out, ICSPDAT:Out, ICSPCLK:Out
 	e++
 	_, err := f.devA.write(f.commands[b:e])
 	if err != nil {
 		return err
 	}
-	b = e
-	f.commands[e] = 0x80
-	e++
-	f.commands[e] = 0b0101_0001 // S_DAT, CLK, WAIT, /RST:1, CS
-	e++
-	f.commands[e] = 0b0101_1011 // S_DAT:In, CLK:Out, WAIT:In, /RST:Out, CS:Out
-	e++
+
+	time.Sleep(100 * time.Millisecond)
+
+	// The key sequence
+	key32 := []byte{'M', 'C', 'H', 'P'}
+	for _, k := range key32 {
+		e = f.pushByte(k, e)
+	}
 	_, err = f.devA.write(f.commands[b:e])
 	if err != nil {
 		return err
 	}
 
-	time.Sleep(5 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
-	return nil
-}
-
-func (f *Flash) n64SetAddress(addr uint32) error {
-	bA := 0
-	eA := 0
-	bB := len(f.commands) / 2
-	eB := len(f.commands) / 2
-
-	// ALE_H/ALE_L = ?/? -> 0/0 -> wait -> 1/0 -> 1/1,CS:1 -> 1/1,CS:0
-	// ALE_H/ALE_L = ?/? -> 0/0
-	f.commands[eA] = 0x80
-	eA++
-	f.commands[eA] = 0b0011_0001 // ALE_H, ALE_L, /RE, /WE, CS
-	eA++
-	f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-	eA++
-	// wait 0 =  1.6[us]
-	// wait 1 =  2.8[us] (+1.2[us]  = 1.20u/byte = 150n/bit)
-	// wait 2 =  4.0[us] (+2.4[us]  = 1.20u/byte = 150n/bit)
-	// wait 4 =  6.6[us] (+5.0[us]  = 1.25u/byte = 156n/bit)
-	// wait 9 = 12.5[us] (+10.9[us] = 1.21u/byte = 151n/bit)
-	{
-		f.commands[eA] = 0x8f // wait
-		eA++
-		f.commands[eA] = 9 // uint16 Lo
-		eA++
-		f.commands[eA] = 0 // uint16 Hi
-		eA++
-	}
-	// ALE_H/ALE_L = 0/0 -> 1/0
-	f.commands[eA] = 0x80
-	eA++
-	f.commands[eA] = 0b1011_0001 // ALE_H, ALE_L, /RE, /WE, CS
-	eA++
-	f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-	eA++
-	// ALE_H/ALE_L = 1/0 -> 1/1, CS:0->1
-	f.commands[eA] = 0x80
-	eA++
-	f.commands[eA] = 0b1111_1001 // ALE_H, ALE_L, /RE, /WE, CS
-	eA++
-	f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-	eA++
-	// CS:1->0 for delay 200[ns]
-	f.commands[eA] = 0x80
-	eA++
-	f.commands[eA] = 0b1111_0001 // ALE_H, ALE_L, /RE, /WE, CS
-	eA++
-	f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-	eA++
-
-	// Wait On I/O High
-	f.commands[eB] = 0x88
-	eB++
-	// for delay
-	f.commands[eB] = 0x80
-	eB++
-	f.commands[eB] = 0b0101_0001 // S_DAT, CLK, WAIT, /RST, CS
-	eB++
-	f.commands[eB] = 0b0101_1011 // S_DAT:In, CLK:Out, WAIT:In, /RST:Out, CS:Out
-	eB++
-
-	// addr Hi
-	f.commands[eB] = 0x82
-	eB++
-	f.commands[eB] = uint8(addr >> 24) // AD15-8
-	eB++
-	f.commands[eB] = 0xff // AD15-8:Out
-	eB++
-	f.commands[eA] = 0x82
-	eA++
-	f.commands[eA] = uint8((addr >> 16) & 0xff) // AD7-0
-	eA++
-	f.commands[eA] = 0xff // AD7-0:Out
-	eA++
-	// ALE_H/ALE_L = 1/1 -> 0/1, CS:0->1
-	f.commands[eA] = 0x80
-	eA++
-	f.commands[eA] = 0b0111_1001 // ALE_H, ALE_L, /RE, /WE, CS
-	eA++
-	f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-	eA++
-	// CS:1->0 for delay
-	f.commands[eA] = 0x80
-	eA++
-	f.commands[eA] = 0b0111_0001 // ALE_H, ALE_L, /RE, /WE, CS
-	eA++
-	f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-	eA++
-
-	// Wait On I/O High
-	f.commands[eB] = 0x88
-	eB++
-	// for delay
-	f.commands[eB] = 0x80
-	eB++
-	f.commands[eB] = 0b0101_0001 // S_DAT, CLK, WAIT, /RST, CS
-	eB++
-	f.commands[eB] = 0b0101_1011 // S_DAT:In, CLK:Out, WAIT:In, /RST:Out, CS:Out
-	eB++
-
-	// addr Lo
-	f.commands[eB] = 0x82
-	eB++
-	f.commands[eB] = uint8((addr >> 8) & 0xff) // AD15-8
-	eB++
-	f.commands[eB] = 0xff // AD15-8:Out
-	eB++
-	f.commands[eA] = 0x82
-	eA++
-	f.commands[eA] = uint8(addr & 0xff) // AD7-0
-	eA++
-	f.commands[eA] = 0xff // AD7-0:Out
-	eA++
-	// ALE_H/ALE_L = 0/1 -> 0/0, CS:0->1
-	f.commands[eA] = 0x80
-	eA++
-	f.commands[eA] = 0b0011_1001 // ALE_H, ALE_L, /RE, /WE, CS
-	eA++
-	f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-	eA++
-	// CS:1->0 for delay
-	f.commands[eA] = 0x80
-	eA++
-	f.commands[eA] = 0b0011_0001 // ALE_H, ALE_L, /RE, /WE, CS
-	eA++
-	f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-	eA++
-
-	// Wait On I/O High
-	f.commands[eB] = 0x88
-	eB++
-	// for delay
-	f.commands[eB] = 0x80
-	eB++
-	f.commands[eB] = 0b0101_0001 // S_DAT, CLK, WAIT, /RST, CS
-	eB++
-	f.commands[eB] = 0b0101_1011 // S_DAT:In, CLK:Out, WAIT:In, /RST:Out, CS:Out
-	eB++
-
-	// Bus direction
-	f.commands[eB] = 0x82
-	eB++
-	f.commands[eB] = 0x00 // AD15-8
-	eB++
-	f.commands[eB] = 0x00 // AD15-8:In
-	eB++
-	f.commands[eA] = 0x82
-	eA++
-	f.commands[eA] = 0x00 // AD7-0
-	eA++
-	f.commands[eA] = 0x00 // AD7-0:In
-	eA++
-
-	_, err := f.devA.write(f.commands[bB:eB])
+	// User IDs (32 Words)
+	err = f.loadAddress(0x20_0000)
 	if err != nil {
 		return err
 	}
-	_, err = f.devA.write(f.commands[bA:eA])
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (f *Flash) n64ReadROM512() ([]byte, error) {
-	bA := 0
-	eA := 0
-	bB := len(f.commands) / 2
-	eB := len(f.commands) / 2
-
-	for i := 0; i < 256; i++ {
-		// /RE:1->0
-		f.commands[eA] = 0x80
-		eA++
-		f.commands[eA] = 0b0001_0001 // ALE_H, ALE_L, /RE, /WE, CS
-		eA++
-		f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-		eA++
-		// TODO: for flash?
-		// wait 15 = 1.6u + 150/bit * 8 * 15 = 19.6[us]
-		if false {
-			f.commands[eA] = 0x8f // wait
-			eA++
-			f.commands[eA] = 15 // uint16 Lo
-			eA++
-			f.commands[eA] = 0 // uint16 Hi
-			eA++
+	for i := 0; i < 32; i++ {
+		value16, err := f.readWord()
+		if err != nil {
+			return err
 		}
-		// CS:0->1
-		f.commands[eA] = 0x80
-		eA++
-		f.commands[eA] = 0b0001_1001 // ALE_H, ALE_L, /RE, /WE, CS
-		eA++
-		f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-		eA++
-		// CS:1->0 for delay
-		f.commands[eA] = 0x80
-		eA++
-		f.commands[eA] = 0b0001_0001 // ALE_H, ALE_L, /RE, /WE, CS
-		eA++
-		f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-		eA++
+		f.UserIDs[i] = value16
+	}
 
-		// Wait On I/O High
-		f.commands[eB] = 0x88
-		eB++
-		// for delay
-		f.commands[eB] = 0x80
-		eB++
-		f.commands[eB] = 0b0101_0001 // S_DAT, CLK, WAIT, /RST, CS
-		eB++
-		f.commands[eB] = 0b0101_1011 // S_DAT:In, CLK:Out, WAIT:In, /RST:Out, CS:Out
-		eB++
+	// Configuration Bytes (10 Bytes)
+	err = f.loadAddress(0x30_0000)
+	if err != nil {
+		return err
+	}
+	for i := 0; i < 10; i++ {
+		value8, err := f.readByte()
+		if err != nil {
+			return err
+		}
+		f.Configuration[i] = value8
+	}
+
+	// Revision ID (1 Word), Device ID (1 Word)
+	err = f.loadAddress(0x3f_fffc)
+	if err != nil {
+		return err
+	}
+	f.RevisionID, err = f.readWord()
+	if err != nil {
+		return err
+	}
+	f.DeviceID, err = f.readWord()
+	if err != nil {
+		return err
+	}
+
+	// reset
+	err = f.loadAddress(0)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// send a byte from MSB
+func (f *Flash) pushByte(data byte, pos int) int {
+	for i := 7; i >= 0; i-- {
+		b := byte((data >> i) & 1)
+
+		f.commands[pos] = 0x80
+		pos++
+		f.commands[pos] = ((b << 5) | 0b0001_0001) // /MCLR:0,   state:0,   ICSPDAT:b,   ICSPCLK:1
+		pos++
+		f.commands[pos] = 0b1111_1011 //              /MCLR:Out, state:Out, ICSPDAT:Out, ICSPCLK:Out
+		pos++
+
+		f.commands[pos] = 0x80
+		pos++
+		f.commands[pos] = ((b << 5) | 0b0000_0001) // /MCLR:0,   state:0,   ICSPDAT:b,   ICSPCLK:0
+		pos++
+		f.commands[pos] = 0b1111_1011 //              /MCLR:Out, state:Out, ICSPDAT:Out, ICSPCLK:Out
+		pos++
+	}
+	return pos
+}
+
+// delay (0-7 + 1) clocks
+//
+// 1 clock @ 2[MHz] -> 500 nsec
+func (f *Flash) pushDelay(clk byte, pos int) int {
+	f.commands[pos] = 0x8e // wait
+	pos++
+	f.commands[pos] = clk - 1
+	pos++
+	return pos
+}
+
+func (f *Flash) loadAddress(addr uint32) error {
+	b := 0
+	e := 0
+
+	// Load PC address: 0x80
+	e = f.pushByte(0x80, e)
+	e = f.pushDelay(2, e)
+
+	addr1_22_1 := ((addr & 0x3f_ffff) << 1) // 0:Start bit, 22:addr, 0:Stop bit
+	e = f.pushByte(byte((addr1_22_1>>16)&0xff), e)
+	e = f.pushByte(byte((addr1_22_1>>8)&0xff), e)
+	e = f.pushByte(byte((addr1_22_1>>0)&0xff), e)
+	e = f.pushDelay(2, e)
+
+	_, err := f.devA.write(f.commands[b:e])
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (f *Flash) readWord() (uint16, error) {
+	b := 0
+	e := 0
+
+	// Read Data from NVM & PC++: 0xfe
+	e = f.pushByte(0xfe, e)
+
+	// ICSPDAT: Out -> In
+	{
+		f.commands[e] = 0x80
+		e++
+		f.commands[e] = 0b0000_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:0
+		e++
+		f.commands[e] = 0b1101_1011 // /MCLR:Out, state:Out, ICSPDAT:In,  ICSPCLK:Out
+		e++
+	}
+	e = f.pushDelay(2, e)
+
+	for i := 23; i >= 0; i-- {
+		// clock: high
+		f.commands[e] = 0x80
+		e++
+		f.commands[e] = 0b0001_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:1
+		e++
+		f.commands[e] = 0b1101_1011 // /MCLR:Out, state:Out, ICSPDAT:In,  ICSPCLK:Out
+		e++
 
 		// read
-		f.commands[eB] = 0x83 // AD15-8
-		eB++
-		f.commands[eA] = 0x83 // AD7-0
-		eA++
+		f.commands[e] = 0x81
+		e++
 
-		// /RE:0->1
-		f.commands[eA] = 0x80
-		eA++
-		f.commands[eA] = 0b0011_0001 // ALE_H, ALE_L, /RE, /WE, CS
-		eA++
-		f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-		eA++
-		// for delay
-		f.commands[eA] = 0x80
-		eA++
-		f.commands[eA] = 0b0011_0001 // ALE_H, ALE_L, /RE, /WE, CS
-		eA++
-		f.commands[eA] = 0b1111_1011 // ALE_H:Out, ALE_L:Out, /RE:Out, /WE:Out, CS:Out
-		eA++
+		// clock: low
+		f.commands[e] = 0x80
+		e++
+		f.commands[e] = 0b0000_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:0
+		e++
+		f.commands[e] = 0b1101_1011 // /MCLR:Out, state:Out, ICSPDAT:In,  ICSPCLK:Out
+		e++
 	}
 
-	_, err := f.devA.write(f.commands[bB:eB])
+	// ICSPDAT: In -> Out
+	{
+		f.commands[e] = 0x80
+		e++
+		f.commands[e] = 0b0000_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:0
+		e++
+		f.commands[e] = 0b1111_1011 // /MCLR:Out, state:Out, ICSPDAT:Out, ICSPCLK:Out
+		e++
+	}
+	e = f.pushDelay(2, e)
+
+	_, err := f.devA.write(f.commands[b:e])
 	if err != nil {
-		return nil, err
-	}
-	bB = eB
-	eB += 256
-	_, err = f.devA.write(f.commands[bA:eA])
-	if err != nil {
-		return nil, err
-	}
-	bA = eA
-	eA += 256
-
-	err = f.devA.readAll(f.commands[bB:eB])
-	if err != nil {
-		return nil, err
-	}
-	err = f.devA.readAll(f.commands[bA:eA])
-	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
-	// interleave B(hi) and A(lo)
-	result := f.commands[eB : eB+512]
-	for i := 0; i < 256; i++ {
-		result[i*2+0] = f.commands[bB+i]
-		result[i*2+1] = f.commands[bA+i]
+	result24 := f.commands[e : e+24]
+	err = f.devA.readAll(result24)
+	if err != nil {
+		return 0, err
 	}
 
-	return result, nil
+	// from MSB
+	var value16 uint16
+	for _, b := range result24[7 : 7+16] {
+		value16 = ((value16 << 1) | uint16((b&0b0010_0000)>>5))
+	}
+
+	return value16, nil
+}
+
+func (f *Flash) readByte() (byte, error) {
+	value16, err := f.readWord()
+	if err != nil {
+		return 0, err
+	}
+	return byte(value16 & 0xff), nil
 }
