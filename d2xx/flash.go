@@ -10,6 +10,7 @@ import (
 )
 
 type Flash struct {
+	// reader/writer
 	devA     *device
 	commands [8192 * 2]byte
 
@@ -18,8 +19,10 @@ type Flash struct {
 	Configuration [10]byte
 	DeviceID      uint16
 	RevisionID    uint16
+	RevisionMajor string
+	RevisionMinor uint8
 
-	// Program Flash Memory
+	// target: Program Flash Memory
 	lenPFM int
 	posPFM int
 }
@@ -132,7 +135,21 @@ func (f *Flash) Read(p []byte) (n int, err error) {
 		return n, err
 	}
 
-	for i := 0; i < words; i++ {
+	i := 0
+	for bytes&1 == 0 && words-i >= 64 {
+		values, err := f.read64Words()
+		if err != nil {
+			return n, err
+		}
+		f.posPFM += 64 * 2
+
+		copy(p, values)
+		p = p[64*2:]
+		n += 64 * 2
+
+		i += 64
+	}
+	for i < words {
 		value16, err := f.readWord()
 		if err != nil {
 			return n, err
@@ -145,6 +162,8 @@ func (f *Flash) Read(p []byte) (n int, err error) {
 			p[i*2+1] = byte(value16 >> 8) // swap
 			n += 1
 		}
+
+		i++
 	}
 	return n, nil
 }
@@ -340,6 +359,8 @@ func (f *Flash) resetPIC() error {
 	if err != nil {
 		return err
 	}
+	f.RevisionMajor = string(rune('A' + ((f.RevisionID >> 6) & 0b11_1111)))
+	f.RevisionMinor = uint8(f.RevisionID & 0b11_1111)
 	f.DeviceID, err = f.readWord()
 	if err != nil {
 		return err
@@ -396,6 +417,58 @@ func (f *Flash) pushDelay(clk byte, pos int) int {
 	return pos
 }
 
+func (f *Flash) pushReadWord(pos int) int {
+	// Read Data from NVM & PC++: 0xfe
+	pos = f.pushByte(0xfe, pos) // +6
+
+	// ICSPDAT: Out -> In // +3
+	{
+		f.commands[pos] = 0x80
+		pos++
+		f.commands[pos] = 0b0000_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:0
+		pos++
+		f.commands[pos] = 0b1101_1011 // /MCLR:Out, state:Out, ICSPDAT:In,  ICSPCLK:Out
+		pos++
+	}
+	pos = f.pushDelay(2, pos) // +2
+
+	for i := 23; i >= 0; i-- { // +7/loop
+		// clock: high
+		f.commands[pos] = 0x80
+		pos++
+		f.commands[pos] = 0b0001_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:1
+		pos++
+		f.commands[pos] = 0b1101_1011 // /MCLR:Out, state:Out, ICSPDAT:In,  ICSPCLK:Out
+		pos++
+
+		// read
+		f.commands[pos] = 0x81
+		pos++
+
+		// clock: low
+		f.commands[pos] = 0x80
+		pos++
+		f.commands[pos] = 0b0000_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:0
+		pos++
+		f.commands[pos] = 0b1101_1011 // /MCLR:Out, state:Out, ICSPDAT:In,  ICSPCLK:Out
+		pos++
+	}
+
+	// ICSPDAT: In -> Out // +3
+	{
+		f.commands[pos] = 0x80
+		pos++
+		f.commands[pos] = 0b0000_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:0
+		pos++
+		f.commands[pos] = 0b1111_1011 // /MCLR:Out, state:Out, ICSPDAT:Out, ICSPCLK:Out
+		pos++
+	}
+	pos = f.pushDelay(2, pos) // +2
+
+	// 6+3+2 + 7*24 + 3+2 = 184/16bits
+	return pos
+}
+
 func (f *Flash) loadAddress(addr uint32) error {
 	b := 0
 	e := 0
@@ -418,56 +491,44 @@ func (f *Flash) loadAddress(addr uint32) error {
 	return nil
 }
 
+func (f *Flash) read64Words() ([]byte, error) {
+	b := 0
+	e := 0
+
+	for i := 0; i < 64; i++ {
+		e = f.pushReadWord(e)
+	}
+
+	_, err := f.devA.write(f.commands[b:e])
+	if err != nil {
+		return nil, err
+	}
+
+	results24 := f.commands[0 : 24*64]
+	err = f.devA.readAll(results24)
+	if err != nil {
+		return nil, err
+	}
+
+	values := make([]byte, 64*2)
+	for i := 0; i < 64; i++ {
+		// from MSB
+		value16 := uint16(0)
+		for _, b := range results24[24*i+7 : 24*i+7+16] {
+			value16 = ((value16 << 1) | uint16((b&0b0010_0000)>>5))
+		}
+		// swap
+		values[i*2+0] = byte(value16 & 0xff)
+		values[i*2+1] = byte(value16 >> 8)
+	}
+	return values, nil
+}
+
 func (f *Flash) readWord() (uint16, error) {
 	b := 0
 	e := 0
 
-	// Read Data from NVM & PC++: 0xfe
-	e = f.pushByte(0xfe, e)
-
-	// ICSPDAT: Out -> In
-	{
-		f.commands[e] = 0x80
-		e++
-		f.commands[e] = 0b0000_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:0
-		e++
-		f.commands[e] = 0b1101_1011 // /MCLR:Out, state:Out, ICSPDAT:In,  ICSPCLK:Out
-		e++
-	}
-	e = f.pushDelay(2, e)
-
-	for i := 23; i >= 0; i-- {
-		// clock: high
-		f.commands[e] = 0x80
-		e++
-		f.commands[e] = 0b0001_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:1
-		e++
-		f.commands[e] = 0b1101_1011 // /MCLR:Out, state:Out, ICSPDAT:In,  ICSPCLK:Out
-		e++
-
-		// read
-		f.commands[e] = 0x81
-		e++
-
-		// clock: low
-		f.commands[e] = 0x80
-		e++
-		f.commands[e] = 0b0000_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:0
-		e++
-		f.commands[e] = 0b1101_1011 // /MCLR:Out, state:Out, ICSPDAT:In,  ICSPCLK:Out
-		e++
-	}
-
-	// ICSPDAT: In -> Out
-	{
-		f.commands[e] = 0x80
-		e++
-		f.commands[e] = 0b0000_0001 // /MCLR:0,   state:0,   ICSPDAT:0,   ICSPCLK:0
-		e++
-		f.commands[e] = 0b1111_1011 // /MCLR:Out, state:Out, ICSPDAT:Out, ICSPCLK:Out
-		e++
-	}
-	e = f.pushDelay(2, e)
+	e = f.pushReadWord(e)
 
 	_, err := f.devA.write(f.commands[b:e])
 	if err != nil {

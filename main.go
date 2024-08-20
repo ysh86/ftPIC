@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -12,18 +13,25 @@ import (
 )
 
 func main() {
-	//Mandelbrot()
-
 	// args
 	var (
-		outFile string
-		inFile  string
+		outFile  string
+		inFile   string
+		ihexFile string
 	)
 	flag.StringVar(&outFile, "r", "", "read whole internal flash")
 	flag.StringVar(&inFile, "w", "", "an ihex file to write")
+	flag.StringVar(&ihexFile, "i", "", "dump ihex to raw bin")
 	flag.Parse()
 	if len(flag.Args()) > 0 {
 		flag.Usage()
+		return
+	}
+
+	if ihexFile != "" {
+		//Mandelbrot()
+		binFile := ihexFile + ".bin"
+		dumpBin(binFile, ihexFile)
 		return
 	}
 
@@ -44,18 +52,11 @@ func main() {
 
 	// target
 	fmt.Println("Target info:")
-	major := "A"
-	if (flash.RevisionID>>6)&0b11_1111 == 1 {
-		major = "B"
-	}
-	if (flash.RevisionID>>6)&0b11_1111 == 2 {
-		major = "C"
-	}
 	fmt.Printf("device: %04X, revision: %04X (%s%d)\n",
 		flash.DeviceID,
 		flash.RevisionID,
-		major,
-		flash.RevisionID&0b11_1111,
+		flash.RevisionMajor,
+		flash.RevisionMinor,
 	)
 	fmt.Printf("User IDs (32 Words)\n")
 	for i := 0; i < 32; i += 8 {
@@ -142,6 +143,47 @@ func writeFlash(flash *d2xx.Flash, inFile string) error {
 
 			data = data[i:]
 		}
+	}
+
+	return nil
+}
+
+func dumpBin(binFile, ihexFile string) error {
+	fw, err := os.Create(binFile)
+	if err != nil {
+		return err
+	}
+	defer fw.Close()
+	w := bufio.NewWriter(fw)
+	defer w.Flush()
+
+	r, err := os.Open(ihexFile)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	ihex := gohex.NewMemory()
+	err = ihex.ParseIntelHex(r)
+	if err != nil {
+		return err
+	}
+
+	i := 0
+	for _, segment := range ihex.GetDataSegments() {
+		b := int(segment.Address)
+		e := b + len(segment.Data)
+		data := segment.Data[0:]
+
+		fmt.Printf("segment: %06x-%06x\n", b, e)
+
+		for i < b {
+			w.WriteByte(0xff)
+			i++
+		}
+
+		w.Write(data)
+		i += len(data)
 	}
 
 	return nil
