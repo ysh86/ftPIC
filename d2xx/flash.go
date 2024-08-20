@@ -15,7 +15,7 @@ type Flash struct {
 	commands [8192 * 2]byte
 
 	// target
-	UserIDs       [32]uint16
+	UserIDs       [32][2]byte
 	Configuration [10]byte
 	DeviceID      uint16
 	RevisionID    uint16
@@ -156,10 +156,10 @@ func (f *Flash) Read(p []byte) (n int, err error) {
 		}
 		f.posPFM += 2
 
-		p[i*2+0] = byte(value16 & 0xff) // swap
+		p[i*2+0] = byte(value16[0])
 		n += 1
 		if bytes&1 == 0 {
-			p[i*2+1] = byte(value16 >> 8) // swap
+			p[i*2+1] = byte(value16[1])
 			n += 1
 		}
 
@@ -355,16 +355,18 @@ func (f *Flash) resetPIC() error {
 	if err != nil {
 		return err
 	}
-	f.RevisionID, err = f.readWord()
+	value16, err := f.readWord()
 	if err != nil {
 		return err
 	}
+	f.RevisionID = (uint16(value16[0]) | (uint16(value16[1]) << 8))
 	f.RevisionMajor = string(rune('A' + ((f.RevisionID >> 6) & 0b11_1111)))
 	f.RevisionMinor = uint8(f.RevisionID & 0b11_1111)
-	f.DeviceID, err = f.readWord()
+	value16, err = f.readWord()
 	if err != nil {
 		return err
 	}
+	f.DeviceID = (uint16(value16[0]) | (uint16(value16[1]) << 8))
 
 	// reset
 	err = f.loadAddress(0)
@@ -524,28 +526,31 @@ func (f *Flash) read64Words() ([]byte, error) {
 	return values, nil
 }
 
-func (f *Flash) readWord() (uint16, error) {
+func (f *Flash) readWord() (value16 [2]byte, err error) {
 	b := 0
 	e := 0
 
 	e = f.pushReadWord(e)
 
-	_, err := f.devA.write(f.commands[b:e])
+	_, err = f.devA.write(f.commands[b:e])
 	if err != nil {
-		return 0, err
+		return value16, err
 	}
 
 	result24 := f.commands[e : e+24]
 	err = f.devA.readAll(result24)
 	if err != nil {
-		return 0, err
+		return value16, err
 	}
 
 	// from MSB
-	var value16 uint16
+	var u16 uint16
 	for _, b := range result24[7 : 7+16] {
-		value16 = ((value16 << 1) | uint16((b&0b0010_0000)>>5))
+		u16 = ((u16 << 1) | uint16((b&0b0010_0000)>>5))
 	}
+	// swap
+	value16[0] = byte(u16 & 0xff)
+	value16[1] = byte(u16 >> 8)
 
 	return value16, nil
 }
@@ -555,5 +560,5 @@ func (f *Flash) readByte() (byte, error) {
 	if err != nil {
 		return 0, err
 	}
-	return byte(value16 & 0xff), nil
+	return byte(value16[0]), nil
 }

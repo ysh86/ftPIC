@@ -62,7 +62,7 @@ func main() {
 	for i := 0; i < 32; i += 8 {
 		for ii := 0; ii < 8; ii++ {
 			value16 := flash.UserIDs[i+ii]
-			fmt.Printf(" %02x %02x", value16&0xff, value16>>8) // swap
+			fmt.Printf(" %02x %02x", value16[0], value16[1])
 		}
 		fmt.Println()
 	}
