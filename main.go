@@ -101,6 +101,7 @@ func dumpFlash(flash *d2xx.Flash, outFile string) (n int64, err error) {
 	}
 	defer w.Close()
 
+	flash.Seek(0, io.SeekStart)
 	n, err = io.Copy(w, flash)
 	if err != nil {
 		return 0, err

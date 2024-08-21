@@ -104,7 +104,7 @@ func OpenFlash() (*Flash, error) {
 	return f, nil
 }
 
-func (f *Flash) Close() {
+func (f *Flash) Close() error {
 	if f.devA != nil {
 		b := 0
 		e := 0
@@ -123,11 +123,15 @@ func (f *Flash) Close() {
 		f.devA.closeDev()
 		f.devA = nil
 	}
+	return nil
 }
 
 func (f *Flash) Read(p []byte) (n int, err error) {
 	if f.posPFM >= f.lenPFM {
 		return n, io.EOF
+	}
+	if len(p) == 0 {
+		return 0, nil
 	}
 
 	bytes := len(p)
@@ -172,6 +176,27 @@ func (f *Flash) Read(p []byte) (n int, err error) {
 		i++
 	}
 	return n, nil
+}
+
+func (f *Flash) Seek(offset int64, whence int) (int64, error) {
+	if offset&1 == 1 {
+		return 0, errors.New("Seek: invalid offset: odd number")
+	}
+
+	switch whence {
+	default:
+		return 0, errors.New("Seek: invalid whence")
+	case io.SeekStart:
+		f.posPFM = int(offset)
+	case io.SeekCurrent:
+		f.posPFM += int(offset)
+	}
+
+	if f.posPFM < 0 || f.lenPFM <= f.posPFM {
+		return 0, errors.New("Seek: invalid offset")
+	}
+
+	return int64(f.posPFM), nil
 }
 
 func (f *Flash) BulkErase(regions Region) error {
