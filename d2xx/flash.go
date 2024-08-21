@@ -535,6 +535,56 @@ func (f *Flash) pushReadWord(pos int) int {
 	return pos
 }
 
+func (f *Flash) pushWriteWord(value16 []byte, pos int) int {
+	if len(value16) < 2 {
+		return pos
+	}
+	if value16[0] == 0xff && value16[1] == 0xff {
+		// Increment Address: 0xf8
+		pos = f.pushByte(0xf8, pos)
+		pos = f.pushDelay(2, pos)
+		return pos
+	}
+
+	// Program Data & PC++: 0xe0
+	pos = f.pushByte(0xe0, pos)
+	pos = f.pushDelay(2, pos)
+
+	// swap
+	value7_16_1 := (uint32(value16[1]) << 9) | (uint32(value16[0]) << 1) // 0:Start bit, 16:value, 0:Stop bit
+	pos = f.pushByte(byte((value7_16_1>>16)&0xff), pos)
+	pos = f.pushByte(byte((value7_16_1>>8)&0xff), pos)
+	pos = f.pushByte(byte((value7_16_1>>0)&0xff), pos)
+
+	// T PINT: 75[usec]
+	pos = f.pushDelayMicrosecond(75, pos)
+
+	return pos
+}
+
+func (f *Flash) pushWriteByte(value8 byte, pos int) int {
+	if value8 == 0xff {
+		// Increment Address: 0xf8
+		pos = f.pushByte(0xf8, pos)
+		pos = f.pushDelay(2, pos)
+		return pos
+	}
+
+	// Program Data & PC++: 0xe0
+	pos = f.pushByte(0xe0, pos)
+	pos = f.pushDelay(2, pos)
+
+	value15_8_1 := (uint32(value8) << 1) // 0:Start bit, 8:value, 0:Stop bit
+	pos = f.pushByte(byte((value15_8_1>>16)&0xff), pos)
+	pos = f.pushByte(byte((value15_8_1>>8)&0xff), pos)
+	pos = f.pushByte(byte((value15_8_1>>0)&0xff), pos)
+
+	// T PDFM: 11[msec]
+	pos = f.pushDelayMillisecond(11, pos)
+
+	return pos
+}
+
 func (f *Flash) loadAddress(addr uint32) error {
 	b := 0
 	e := 0
