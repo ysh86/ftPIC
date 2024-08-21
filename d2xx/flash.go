@@ -223,6 +223,27 @@ func (f *Flash) BulkErase(regions Region) error {
 	return nil
 }
 
+func (f *Flash) WritePFM(data []byte) error {
+	if len(data) < f.lenPFM {
+		return errors.New("not enough data")
+	}
+
+	for ii := 0; ii < f.lenPFM; ii += 128 {
+		b := 0
+		e := 0
+
+		for i := 0; i < 64; i++ {
+			e = f.pushWriteWord(data[ii+i*2:ii+i*2+2], e)
+		}
+		_, err := f.devA.write(f.commands[b:e])
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (f *Flash) WriterInfo() (ftdi.DevType, uint16, uint16) {
 	return f.devA.t, f.devA.venID, f.devA.devID
 }

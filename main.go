@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -28,10 +28,30 @@ func main() {
 		return
 	}
 
+	// load
+	var err error
+	var data []byte
+	if ihexFile != "" {
+		inFile = ihexFile
+	}
+	if inFile != "" {
+		fmt.Println("Load info:")
+		data, err = loadHex(inFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "loadHex: %s\n", err)
+			return
+		}
+		fmt.Println()
+	}
+
+	// load only
 	if ihexFile != "" {
 		//Mandelbrot()
 		binFile := ihexFile + ".bin"
-		dumpBin(binFile, ihexFile)
+		err := os.WriteFile(binFile, data, 0666)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "load: %s\n", err)
+		}
 		return
 	}
 
@@ -85,7 +105,7 @@ func main() {
 
 	// write ihex
 	if inFile != "" {
-		err := writeFlash(flash, inFile)
+		err := writeFlash(flash, data)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "write: %s\n", err)
 		} else {
@@ -101,7 +121,11 @@ func dumpFlash(flash *d2xx.Flash, outFile string) (n int64, err error) {
 	}
 	defer w.Close()
 
-	flash.Seek(0, io.SeekStart)
+	_, err = flash.Seek(0, io.SeekStart)
+	if err != nil {
+		return 0, err
+	}
+
 	n, err = io.Copy(w, flash)
 	if err != nil {
 		return 0, err
@@ -110,73 +134,39 @@ func dumpFlash(flash *d2xx.Flash, outFile string) (n int64, err error) {
 	return n, err
 }
 
-func writeFlash(flash *d2xx.Flash, inFile string) error {
-	r, err := os.Open(inFile)
+func writeFlash(flash *d2xx.Flash, data []byte) error {
+	err := flash.BulkErase(d2xx.REGION_FLASH)
 	if err != nil {
 		return err
 	}
-	defer r.Close()
-
-	ihex := gohex.NewMemory()
-	err = ihex.ParseIntelHex(r)
+	_, err = flash.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
 	}
-
-	for _, segment := range ihex.GetDataSegments() {
-		fmt.Println()
-		fmt.Println("segment:")
-
-		b := int(segment.Address)
-		e := b + len(segment.Data)
-		data := segment.Data[0:]
-
-		for b < e {
-			i := 0
-
-			fmt.Printf("%06x:", b)
-			for i < 16 && b < e {
-				fmt.Printf(" %02x", data[i])
-				i++
-				b++
-			}
-			fmt.Println()
-
-			data = data[i:]
-		}
-	}
-
-	return nil
+	return flash.WritePFM(data)
 }
 
-func dumpBin(binFile, ihexFile string) error {
-	fw, err := os.Create(binFile)
-	if err != nil {
-		return err
-	}
-	defer fw.Close()
-	w := bufio.NewWriter(fw)
-	defer w.Flush()
-
+func loadHex(ihexFile string) ([]byte, error) {
 	r, err := os.Open(ihexFile)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer r.Close()
 
 	ihex := gohex.NewMemory()
 	err = ihex.ParseIntelHex(r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	var w bytes.Buffer
 	i := 0
 	for _, segment := range ihex.GetDataSegments() {
 		b := int(segment.Address)
 		e := b + len(segment.Data)
 		data := segment.Data[0:]
 
-		fmt.Printf("segment: %06x-%06x\n", b, e)
+		fmt.Printf("segment: %06x-%06x: %7d [bytes]\n", b, e, e-b)
 
 		for i < b {
 			w.WriteByte(0xff)
@@ -187,5 +177,5 @@ func dumpBin(binFile, ihexFile string) error {
 		i += len(data)
 	}
 
-	return nil
+	return w.Bytes(), nil
 }
