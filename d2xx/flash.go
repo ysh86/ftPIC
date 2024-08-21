@@ -27,6 +27,16 @@ type Flash struct {
 	posPFM int
 }
 
+// Setting multiple bits is valid.
+type Region uint32
+
+const (
+	REGION_DATA_EEPROM   Region = 0b0001
+	REGION_FLASH         Region = 0b0010
+	REGION_USER_ID       Region = 0b0100
+	REGION_CONFIGURATION Region = 0b1000
+)
+
 func OpenFlash() (*Flash, error) {
 	const (
 		SUPPORTED = ftdi.FT2232H
@@ -115,10 +125,6 @@ func (f *Flash) Close() {
 	}
 }
 
-func (f *Flash) WriterInfo() (ftdi.DevType, uint16, uint16) {
-	return f.devA.t, f.devA.venID, f.devA.devID
-}
-
 func (f *Flash) Read(p []byte) (n int, err error) {
 	if f.posPFM >= f.lenPFM {
 		return n, io.EOF
@@ -166,6 +172,34 @@ func (f *Flash) Read(p []byte) (n int, err error) {
 		i++
 	}
 	return n, nil
+}
+
+func (f *Flash) BulkErase(regions Region) error {
+	b := 0
+	e := 0
+
+	// Bulk Erase: 0x18
+	e = f.pushByte(0x18, e)
+	e = f.pushDelay(2, e)
+
+	r4_1 := (regions << 1) // 4:regions, 0:Stop bit
+	e = f.pushByte(byte((r4_1>>16)&0xff), e)
+	e = f.pushByte(byte((r4_1>>8)&0xff), e)
+	e = f.pushByte(byte((r4_1>>0)&0xff), e)
+
+	// T ERAB: 11[msec]
+	e = f.pushDelayMillisecond(11, e)
+
+	_, err := f.devA.write(f.commands[b:e])
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (f *Flash) WriterInfo() (ftdi.DevType, uint16, uint16) {
+	return f.devA.t, f.devA.venID, f.devA.devID
 }
 
 func (f *Flash) tryMpsse(dev *device) error {
@@ -310,19 +344,19 @@ func (f *Flash) resetPIC() error {
 		return err
 	}
 
-	time.Sleep(100 * time.Millisecond)
-
+	// T ENTH: 1[msec]
+	e = f.pushDelayMillisecond(10, e)
 	// The key sequence
 	key32 := []byte{'M', 'C', 'H', 'P'}
 	for _, k := range key32 {
 		e = f.pushByte(k, e)
 	}
+	// T ENTH: 1[msec]
+	e = f.pushDelayMillisecond(10, e)
 	_, err = f.devA.write(f.commands[b:e])
 	if err != nil {
 		return err
 	}
-
-	time.Sleep(100 * time.Millisecond)
 
 	// User IDs (32 Words)
 	err = f.loadAddress(0x20_0000)
@@ -415,6 +449,36 @@ func (f *Flash) pushDelay(clk byte, pos int) int {
 	f.commands[pos] = 0x8e // wait
 	pos++
 	f.commands[pos] = clk - 1
+	pos++
+	return pos
+}
+
+// delay usec (>=2)
+//
+// 2 clocks @ 2[MHz] -> 1 usec
+func (f *Flash) pushDelayMicrosecond(usec int, pos int) int {
+	length := (2 * usec * 2 /* margin */) >> 3 // /8: to bytes
+
+	f.commands[pos] = 0x8f // wait
+	pos++
+	f.commands[pos] = uint8(length & 0xff)
+	pos++
+	f.commands[pos] = uint8((length >> 8) & 0xff)
+	pos++
+	return pos
+}
+
+// delay msec
+//
+// 2000 clocks @ 2[MHz] -> 1 msec
+func (f *Flash) pushDelayMillisecond(msec int, pos int) int {
+	length := (2000 * msec * 2 /* margin */) >> 3 // /8: to bytes
+
+	f.commands[pos] = 0x8f // wait
+	pos++
+	f.commands[pos] = uint8(length & 0xff)
+	pos++
+	f.commands[pos] = uint8((length >> 8) & 0xff)
 	pos++
 	return pos
 }
